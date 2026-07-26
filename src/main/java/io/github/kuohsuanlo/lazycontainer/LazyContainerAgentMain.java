@@ -2,6 +2,8 @@ package io.github.kuohsuanlo.lazycontainer;
 
 import java.io.File;
 import java.lang.instrument.Instrumentation;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.jar.JarFile;
 
 /**
@@ -93,17 +95,26 @@ public final class LazyContainerAgentMain {
         if (!inst.isRetransformClassesSupported()) {
             return;
         }
+        List<Class<?>> bases = new ArrayList<>();
+        List<Class<?>> leaves = new ArrayList<>();
         for (Class<?> c : inst.getAllLoadedClasses()) {
             String n = c.getName();
-            if (n.equals("net.minecraft.world.level.block.entity.BaseContainerBlockEntity")
-                    || n.equals("net.minecraft.world.level.block.entity.ChestBlockEntity")
-                    || n.equals("net.minecraft.world.level.block.entity.BarrelBlockEntity")
-                    || n.equals("net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity")) {
-                try {
-                    inst.retransformClasses(c);
-                } catch (Throwable t) {
-                    System.err.println("[LazyContainer] retransform failed for " + n + ": " + t);
-                }
+            if (LazyContainerTransformer.isBaseClass(n)) {
+                bases.add(c);
+            } else if (LazyContainerTransformer.isCandidateClass(n)) {
+                leaves.add(c);
+            }
+        }
+        retransform(inst, bases);
+        retransform(inst, leaves);
+    }
+
+    private static void retransform(Instrumentation inst, List<Class<?>> classes) {
+        for (Class<?> c : classes) {
+            try {
+                inst.retransformClasses(c);
+            } catch (Throwable t) {
+                System.err.println("[LazyContainer] retransform failed for " + c.getName() + ": " + t);
             }
         }
     }

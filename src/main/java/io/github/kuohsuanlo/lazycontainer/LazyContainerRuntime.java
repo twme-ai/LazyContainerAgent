@@ -18,6 +18,9 @@ public final class LazyContainerRuntime {
     /** transformer 成功注入後設為 true。 */
     public static volatile boolean injected = false;
 
+    /** Structurally detected NMS family, or {@code none} before the base class is loaded. */
+    public static volatile String target = "none";
+
     /** 啟動參數 {@code -Dlazycontainer.shadow=true} 開啟 shadow 驗證(存檔逐位元組比對 eager,不一致寫 eager)。 */
     private static final boolean SHADOW = Boolean.getBoolean("lazycontainer.shadow");
 
@@ -117,7 +120,8 @@ public final class LazyContainerRuntime {
                 + " rawSave=" + rawSave.get()
                 + " eagerLoad=" + eagerLoad.get()
                 + " shadowMismatch=" + shadowMismatch.get()
-                + " benignReorder=" + benignReorder.get();
+                + " benignReorder=" + benignReorder.get()
+                + " target=" + target;
     }
 
     /**

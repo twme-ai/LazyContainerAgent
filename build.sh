@@ -1,41 +1,122 @@
 #!/usr/bin/env bash
-# 建置 LazyContainerAgent:
-#  1) mvn package      → agent 類別(Runtime/AgentMain/Transformer)+ shaded/relocated ASM + agent manifest
-#  2) javac template   → 對「真實 26.2 mojmap NMS」編譯 LazyContainerTemplate(產生正確的 NMS 符號 bytecode)
-#  3) jar uf           → 把 template .class 當 passive resource 注入 shaded jar(執行期只被讀 bytes、不被載入為類別)
-# 注意:26.2 NMS classfile = major69,template 必須用 JDK 25 編譯;nms-lib/ 放 26.2 mojmap server jar + 其 libraries。
+# Build one agent jar containing all structurally-selected NMS templates.
 set -euo pipefail
-cd "$(dirname "$0")"
 
-JAVA_HOME="${JAVA_HOME:-/home/logocat/.jdks/jdk-25.0.3+9}"
-export JAVA_HOME
-export PATH="$JAVA_HOME/bin:$PATH"
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
-if [ ! -d nms-lib ] || [ -z "$(ls -A nms-lib/*.jar 2>/dev/null)" ]; then
-  echo "ERROR: nms-lib/ 缺少 NMS 編譯相依 jar(你的 Paper 伺服器核心的 NMS libraries)。" >&2
-  exit 1
+PREPARE=false
+SKIP_TESTS=false
+for arg in "$@"; do
+    case "$arg" in
+        --prepare) PREPARE=true ;;
+        --skip-tests) SKIP_TESTS=true ;;
+        -h|--help)
+            echo "Usage: bash build.sh [--prepare] [--skip-tests]"
+            echo "  --prepare     Download and patch the pinned Paper NMS inputs first"
+            echo "  --skip-tests  Package without running Maven tests"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $arg" >&2
+            exit 2
+            ;;
+    esac
+done
+
+NMS_ROOT="${NMS_ROOT:-$ROOT_DIR/nms-lib}"
+
+if [ "$PREPARE" = true ]; then
+    NMS_ROOT="$NMS_ROOT" bash tools/prepare-paper-nms.sh
 fi
-NMSCP="$(ls nms-lib/*.jar | tr '\n' ':')"
 
-echo "== 1. mvn package =="
-mvn -q -B clean package
+if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/javac" ]; then
+    JAVA_BIN="$JAVA_HOME/bin/java"
+    JAVAC_BIN="$JAVA_HOME/bin/javac"
+else
+    JAVAC_BIN="$(command -v javac || true)"
+    JAVA_BIN="$(command -v java || true)"
+    if [ -n "$JAVAC_BIN" ]; then
+        JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$JAVAC_BIN")")")"
+        export JAVA_HOME
+    fi
+fi
+
+if [ -z "$JAVAC_BIN" ] || [ -z "$JAVA_BIN" ]; then
+    echo "ERROR: Java 21+ JDK is required (java and javac must both exist)." >&2
+    exit 1
+fi
+
+JAVA_SPEC="$($JAVA_BIN -XshowSettings:properties -version 2>&1 \
+    | awk -F= '/java.specification.version/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
+JAVA_MAJOR="${JAVA_SPEC#1.}"
+if [ -z "$JAVA_MAJOR" ] || [ "$JAVA_MAJOR" -lt 21 ]; then
+    echo "ERROR: Java 21+ JDK is required; detected Java ${JAVA_SPEC:-unknown}." >&2
+    exit 1
+fi
+
+PROFILES=(value-io registry-nbt legacy-mojang legacy-spigot)
+declare -A RELEASES=(
+    [value-io]=21
+    [registry-nbt]=21
+    [legacy-mojang]=17
+    [legacy-spigot]=17
+)
+
+for profile in "${PROFILES[@]}"; do
+    if [ ! -f "$NMS_ROOT/$profile/server.jar" ]; then
+        echo "ERROR: missing $NMS_ROOT/$profile/server.jar" >&2
+        echo "Run: bash tools/prepare-paper-nms.sh" >&2
+        exit 1
+    fi
+done
+
+echo "== 1. Compile Java 17 bootstrap agent =="
+mvn -q -B clean compile -DskipTests
+
+echo "== 2. Compile javac-verified NMS templates =="
+for profile in "${PROFILES[@]}"; do
+    source_file="templates/$profile/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.java"
+    output_dir="target/classes/templates/$profile"
+    server_jar="$NMS_ROOT/$profile/server.jar"
+    library_dir="$NMS_ROOT/$profile/work/libraries"
+    libraries=""
+    if [ -d "$library_dir" ]; then
+        libraries="$(find "$library_dir" -type f -name '*.jar' -print | sort | paste -sd: -)"
+    fi
+    classpath="$server_jar:$ROOT_DIR/target/classes"
+    if [ -n "$libraries" ]; then
+        classpath="$classpath:$libraries"
+    fi
+    mkdir -p "$output_dir"
+    echo "-- $profile (release ${RELEASES[$profile]})"
+    "$JAVAC_BIN" --release "${RELEASES[$profile]}" -proc:none -nowarn \
+        -cp "$classpath" -d "$output_dir" "$source_file"
+done
+
+echo "== 3. Test and package shaded agent =="
+MAVEN_TEST_ARGS=()
+if [ "$SKIP_TESTS" = true ]; then
+    MAVEN_TEST_ARGS=(-DskipTests)
+fi
+mvn -q -B package -Dlazycontainer.templatesReady=true \
+    -Dlazycontainer.nmsRoot="$NMS_ROOT" "${MAVEN_TEST_ARGS[@]}"
 
 JAR="target/LazyContainerAgent.jar"
-[ -f "$JAR" ] || { echo "ERROR: $JAR 未產生" >&2; exit 1; }
+if [ ! -f "$JAR" ]; then
+    echo "ERROR: $JAR was not produced" >&2
+    exit 1
+fi
 
-echo "== 2. compile template against real NMS (+ agent classes for LazyContainerRuntime) =="
-rm -rf template-out && mkdir -p template-out
-javac -proc:none -nowarn -cp "${NMSCP}:target/classes" -d template-out \
-  template/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.java
-
-echo "== 3. inject template .class into shaded jar =="
-( cd template-out && jar uf "../$JAR" io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.class )
-
-echo "== 4. verify =="
-echo "-- manifest --"
-unzip -p "$JAR" META-INF/MANIFEST.MF | grep -E 'Premain|Agent-Class|Retransform|Redefine' || true
-echo "-- key entries --"
-unzip -l "$JAR" | grep -E 'lazycontainer/(LazyContainer(Agent|Runtime|Transformer|Template)|asm/)' | head -20
-echo "-- relocated ASM present? --"
-unzip -l "$JAR" | grep -c 'io/github/kuohsuanlo/lazycontainer/asm/' || true
+echo "== 4. Verify packaged resources =="
+jar tf "$JAR" > target/lazycontainer-jar-entries.txt
+for profile in "${PROFILES[@]}"; do
+    entry="templates/$profile/io/github/kuohsuanlo/lazycontainer/LazyContainerTemplate.class"
+    if ! grep -Fxq "$entry" target/lazycontainer-jar-entries.txt; then
+        echo "ERROR: packaged jar misses $entry" >&2
+        exit 1
+    fi
+done
+unzip -p "$JAR" META-INF/MANIFEST.MF \
+    | grep -E 'Premain-Class|Agent-Class|LazyContainer-Supported-Versions'
 echo "DONE: $(readlink -f "$JAR")"

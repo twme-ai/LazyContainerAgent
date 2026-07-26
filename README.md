@@ -3,25 +3,25 @@
 **中文** ｜ [English](README.en.md)
 
 > **箱子物品「延遲反序列化(不急著把資料拆解成遊戲內物件,拖到真的要用才拆)+ 沒碰過就原樣寫回」的 Java agent。**
-> 針對 Paper 26.2,把 chunk(遊戲世界切成一塊一塊的地圖區域,伺服器以此為單位載入/卸載)載入時「立刻把每個箱子的物品從 NBT(Minecraft 儲存物品/方塊資料的二進位格式)解包」與卸載時「重新打包」這兩筆白工砍掉。
+> 支援 Paper 26.2、26.1.x、1.21.11、1.21.8、1.20.6、1.19.4,把 chunk(遊戲世界切成一塊一塊的地圖區域,伺服器以此為單位載入/卸載)載入時「立刻把每個箱子的物品從 NBT(Minecraft 儲存物品/方塊資料的二進位格式)解包」與卸載時「重新打包」這兩筆白工砍掉。
 
-🧠 **經 Claude Fable 5 對抗審計**(49 個獨立 agent 分工找碴+交叉反駁,詳見 [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)):14 條發現全數逐一核實、0 條被推翻;確認**記憶體有界不洩漏、存檔淨省不做白工、正常玩家操作零掉物風險**;找到並已修復一個需要管理員指令才會踩到的邊角漏洞(容器複製/直接改存檔資料時可能共用到同一份資料)。
+🧠 原始單版本 26.2 實作曾經 Claude Fable 5 對抗審計(49 個獨立 agent,詳見 [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)),並修復一個管理員指令才會踩到的資料別名漏洞。**該報告是歷史設計證據,不涵蓋本次多版本重構**;本次變更以四種真實 NMS 位元碼測試與七版 Paper round-trip 作為驗證。
 
 ⚠️ **這不是外掛(plugin),是 Java agent** —— 用 `-javaagent:` 掛在 JVM 上,**不要丟 `plugins/`**(丟了沒用)。
 
 > 🔒 **版本敏感(務必先讀)**
-> 本 agent 以 bytecode **直接織入 Paper 26.2 / Java 25** 的內部類別(template classfile major 69),屬**版本綁死**的工具。
-> - **僅適用於 Paper 26.2 + Java 25。** 任何其他 Minecraft 版本或 Java 版本,**一律不要直接套用**。
-> - 換版必須:① 以對應版本的 NMS 重新編譯 `template/`、② 將 ASM 升級到能解析目標 classfile 版本、③ 重新以 shadow 模式驗證。
-> - 版本不符時會在**開機或首次載入箱子時直接拋出例外**(`VerifyError` / `NoSuchMethodError`)。這是**刻意的「安全停機」設計——絕不會靜默改壞或弄丟資料**,但該節點會無法啟動,因此**務必先在測試環境驗證**再上線。
+> 本 agent 以 bytecode 直接織入 Paper 內部類別,屬**版本敏感**工具。單一 jar 內含四套經真實 Paper NMS 編譯的 template,啟動時依實際方法名稱與 descriptor 自動選擇,不依版本字串猜測。
+> - 已驗證的執行組合:Paper **26.2 / 26.1.2 / 26.1.1 + Java 25**、**1.21.11 / 1.21.8 / 1.20.6 + Java 21**、**1.19.4 + Java 17**。
+> - Paper 官方沒有單獨的 `26.1` 下載項目;本文件中的 `26.1.x` 指已實測的 `26.1.1` 與 `26.1.2`。
+> - 不認得的 NMS 結構會印出 `unsupported NMS layout`,保持全部 vanilla、不啟用優化;任一 leaf 攔截點不完整也會整個 leaf 原樣保留,避免部分改寫。
 > - 測試素材(region / 物品 dump)為目標版格式,請勿在其他版本載入。
-> - 26.2 實機測試報告:[`docs/test-reports/26.2.md`](docs/test-reports/26.2.md)。
+> - 多版本實機測試報告:[`docs/test-reports/multi-version.md`](docs/test-reports/multi-version.md);原 26.2 深度報告:[`docs/test-reports/26.2.md`](docs/test-reports/26.2.md)。
 
 ---
 
 ## 快速上手
 
-> 前提:**Paper 26.2 + Java 25**(其他版本請先看上面的「版本敏感」)。
+> 前提:使用上列已驗證的 Paper / Java 組合。
 
 **1. 放 jar** —— 把 `LazyContainerAgent.jar` 放到節點看得到的位置(跟你的伺服器 jar 放同一層最省事)。**不要丟進 `plugins/`**:它是 Java agent、不是外掛,丟了沒作用。
 
@@ -129,7 +129,7 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 1. **`LazyContainerAgentMain`**(premain,JVM 啟動時最先跑的進入點):把整個 jar 用 `appendToBootstrapClassLoaderSearch` 掛上 bootstrap classloader(JVM 最底層、所有類別載入器共同的祖先,這樣才能繞過 Paper 把 Minecraft 內部程式碼隔離起來的機制),再註冊 transformer(下面第 2 點的類別改寫器)。
 2. **`LazyContainerTransformer`**(執行實際改寫的 ASM 邏輯):
-   - 把 **`LazyContainerTemplate`**(用一般 Java 語法、對著「真實的 Minecraft 伺服器內部程式碼」編譯出來的邏輯,而不是手刻 bytecode)splice(接枝:把外來的欄位/方法插進既有類別)進 `BaseContainerBlockEntity`(所有容器方塊共同的父類別)。→ **編譯器會幫忙驗證方法簽章對不對,比手寫 bytecode 安全得多。**
+   - 先用 base class 的真實方法簽章辨認 value-io、registry-nbt、legacy Mojang 或 legacy Spigot API,再把對應的 **`LazyContainerTemplate`**(用一般 Java 語法、對著真實 Paper NMS 編譯,而不是手刻 bytecode)splice(接枝:把外來的欄位/方法插進既有類別)進共同父類別。→ **編譯器會幫忙驗證方法簽章對不對,比手寫 bytecode 安全得多。**
    - 在箱子/木桶/界伏盒這三個實際子類別(繼承鏈最底層的類別,術語叫 leaf)的 `getItems/getContents/setItems` 入口插「守門檢查」(guard,判斷這容器還沒被解碼、要不要先補解碼)、把 load/save 裡呼叫 `ContainerHelper` 的地方改成呼叫延遲版邏輯。
 3. **`LazyContainerRuntime`**(掛在 bootstrap classloader、純 JDK 沒有依賴任何 Minecraft 類別):shadow(驗證模式)開關 + 計數器。
 4. **安全鐵律**:父類別(base/superclass)沒改寫成功,就**完全不動子類別(leaf)** → 整個退回純原版行為,絕不會產生「方法不存在」這類崩潰性錯誤(`NoSuchMethodError`);過程中任何例外 → 回傳原本沒改過的 bytecode。
@@ -146,9 +146,10 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 
 已驗證:
 - **離線 JVM bytecode 驗證**:注入的 4 個類別全通過 link/verify(JVM 載入類別時檢查 bytecode 合不合法的機制)。
-- **真實 Paper 26.2 端對端**:放物品(diamond×42 / sword{damage:10} / netherite×7)→重啟→重載,**逐字相同**(含 data-component,1.20.5 之後 Minecraft 用來描述物品屬性——附魔、耐久、自訂名稱等——的資料格式);shadow 真實世界 56 容器 `shadowMismatch=0`。詳見 [`docs/test-reports/26.2.md`](docs/test-reports/26.2.md)。
-- **對抗審查(8 種失效模式 × 對抗驗證)**:**0 個會改/掉資料的路徑**;查到 2 個無關痛癢的 byte-identity(逐位元組完全相同)小差異,已修。
-- **Fable 5 二輪對抗審計**(49 agent,更大規模、針對現行程式碼):同樣 **0 個會掉物的路徑**,額外找到並修復 1 個管理員指令才會踩到的邊角漏洞。詳見 [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)。
+- **多版本真實 Paper 端對端**:26.2、26.1.2、26.1.1、1.21.11、1.21.8、1.20.6、1.19.4 都完成兩次啟動 round-trip;箱子、木桶、界伏盒內容完整,且同一 block entity 重載無 `Items` 後不會殘留舊物品。每版皆為 `stash=5 ensure=2 rawSave=8 eagerLoad=0 shadowMismatch=0`。詳見 [`docs/test-reports/multi-version.md`](docs/test-reports/multi-version.md)。
+- **原 Paper 26.2 深度驗證**:含 data-component 與真實世界 56 容器的 shadow 驗證,`shadowMismatch=0`。詳見 [`docs/test-reports/26.2.md`](docs/test-reports/26.2.md)。
+- **原 26.2 對抗審查**:涵蓋 8 種失效模式,並修正 byte-identity 小差異;此為改版前實作的歷史報告。
+- **原 26.2 Fable 5 二輪審計**:49 agent 對當時程式碼審查,找到並修復 1 個管理員指令才會踩到的邊角漏洞。詳見 [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)。
 - **DFU 跨版本**:暫存的原始資料本來就是「DFU(DataFixerUpper,Minecraft 用來把舊版存檔資料自動升級成新版格式的機制)升級後」的版本(DFU 在區塊資料被讀出來的最早期、BE 物件都還沒建立前就跑完了),回寫的自然也是升級後的版本,不會有跨版本相容性問題。
 
 詳見 [`FINDINGS.md`](FINDINGS.md)、[`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md)、[`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)。
@@ -178,12 +179,12 @@ vanilla 載入一個放滿地圖畫/唱片的箱子,光把物品從 NBT 解出�
 ## 建置
 
 ```bash
-bash build.sh        # 需要 JDK 25(見下);產出 target/LazyContainerAgent.jar
+bash build.sh --prepare  # 首次:下載固定版 Paper NMS、編譯、測試、打包
+bash build.sh            # 後續:沿用 nms-lib/,離線重建
 ```
-需要 `nms-lib/`(你的伺服器核心 Paper 的 NMS 編譯相依 libraries,供 `template/` 對真實 NMS 編譯;NMS = Minecraft 伺服器內部程式碼)。
-此目錄不入 git(太大、含 Mojang/Paper 產物),建置前自行放好。
+需要 **JDK 21+、Maven、curl、jq、sha256sum**。`--prepare` 會透過 Paper 官方 Fill API 下載固定 build、驗證 SHA-256,再產生 `nms-lib/`;此目錄不入 git(太大、含 Mojang/Paper 產物)。
 
-流程:① `mvn package`(編出 agent 本體類別 + 把 ASM 這個依賴打包重定位進 jar + 產生 manifest)→ ② `javac` 把 template 對真實 NMS 原始碼編譯(這步**必須用 JDK 25**,因為要編出跟 26.2 伺服器相符的 bytecode 版本;agent 本體類別編譯目標是相容性較廣的 JDK 21 格式,但整個編譯流程統一用 JDK 25 跑,`build.sh` 已內建這個設定)→ ③ `jar uf` 把 template 編出來的 `.class` 檔當成「純資料」塞進 jar(執行期只會被讀取原始 bytes,不會真的被當一個類別載入)。
+流程:① 以 Java 17 bytecode 編出 bootstrap agent → ② `javac` 分別把四套 template 對真實 NMS 編成 Java 21 / 17 bytecode → ③ JUnit 直接拿固定版 Paper class 驗證 base splice、三種 leaf 改寫與失敗原子性 → ④ Shade ASM 並把四份 template class 當純資源放入同一個 jar。執行時 template 不會被 JVM 當一般類別載入,只會由 ASM 讀取與接枝。
 
 ---
 
@@ -203,9 +204,12 @@ java -Xms8000M -Xmx8000M \
 開機 log 應出現:
 ```
 [LazyContainer] LazyContainerAgent —— crafted by 廢土貓大 LogoCat · 廢土 · mcfallout.net
-[LazyContainer] spliced 2 fields + 7 methods into BaseContainerBlockEntity
-[LazyContainer] transformed leaf .../ChestBlockEntity
 [LazyContainer] agent installed (transformer registered) [SHADOW mode]
+[LazyContainer] detected Paper ... (layout=...)
+[LazyContainer] spliced ... fields + ... methods into ...
+[LazyContainer] transformed leaf ...Chest... (load=1 save=1 getItems=1 getContents=1 setItems=1)
+[LazyContainer] transformed leaf ...Barrel... (load=1 save=1 getItems=1 getContents=1 setItems=1)
+[LazyContainer] transformed leaf ...ShulkerBox... (load=1 save=1 getItems=1 getContents=1 setItems=1)
 ```
 
 | 旗標 | 作用 |
@@ -235,7 +239,7 @@ java -Xms8000M -Xmx8000M \
 ## 限制與注意
 
 - **益處依賴「箱子沒被碰」**:churn / 閒置儲存(載入→沒人碰→卸載)大勝;**活躍的漏斗/比較器分類倉**會把箱子 ensure 掉,純省比例變小(主要益處變成「把載入尖峰打散」)。姊妹專案 **ChunkForceManager** 從「別讓 chunk 反覆載卸」那端互補。
-- **版本綁定**:Paper **26.2 / Java 25**(template major 69)。換版需用對應 NMS 重編 `template/`,並把 ASM 升到能讀目標 classfile 版本。版本不符會在開機/首次載箱子時**大聲報錯**(VerifyError/NoSuchMethod),不會靜默毀資料。詳見下方「版本敏感(務必先讀)」。
+- **版本敏感**:只支援文件上列的 Paper 系列與其相符 NMS 結構。即使版本名稱相同,Paper 未來 build 若改動內部簽章也可能被拒絕;請先在 shadow 測試服確認啟動 log 顯示正確 layout 與三個 `transformed leaf`。
 - 不影響:loot table 箱子(走另一條路徑,正交)、雙箱 CompoundContainer(委派到子箱 getItems,已守)、執行緒(載入/tick/卸載皆主執行緒)。
 
 ---
@@ -246,13 +250,16 @@ java -Xms8000M -Xmx8000M \
 src/main/java/io/github/kuohsuanlo/lazycontainer/
   LazyContainerAgentMain.java   premain / bootstrap 掛載
   LazyContainerRuntime.java     bootstrap 純 JDK:shadow 開關 + 計數器
+  NmsTarget.java                四種 NMS 結構、簽章與 template 對照
   LazyContainerTransformer.java ASM:splice base + 改寫 leaf
-template/.../LazyContainerTemplate.java   對真實 NMS 編譯的延遲邏輯(splice 來源)
+templates/{value-io,registry-nbt,legacy-*}/...   四套 javac 驗證的 splice 來源
+tools/prepare-paper-nms.sh      下載、驗證並 patch 固定版 Paper NMS
+tools/runtime-test.sh           真實 Paper 兩次開機 round-trip 測試
 tools/scan_containers.py        掃 region 檔找箱子最密的 chunk(找「載入最貴」的地點)
 build.sh  pom.xml  nms-lib/(不入 git)
 FINDINGS.md           反編譯確認的事實 + 設計定案 + 風險分析
-ADVERSARIAL-REVIEW.md 對抗審查報告(8 失效模式,12 agent)
-FABLE5-AUDIT.md        Fable 5 二輪對抗審計(49 agent,含記憶體/掉物三問結論)
+ADVERSARIAL-REVIEW.md 原 26.2 對抗審查報告(8 失效模式,12 agent)
+FABLE5-AUDIT.md        原 26.2 Fable 5 二輪對抗審計(49 agent)
 TESTING.md            怎麼自己測(自動 round-trip / 手動玩測 / 真實世界副本驗 shadow)
 ```
 

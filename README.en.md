@@ -3,25 +3,25 @@
 [中文](README.md) ｜ **English**
 
 > **A Java agent that lazily deserializes container items, and writes untouched containers back byte-for-byte.**
-> Built for **Paper 26.2**. It removes two pieces of wasted work that cause Minecraft server lag: unpacking every chest's items from NBT on chunk load, and re-packing them on unload.
+> Supports **Paper 26.2, 26.1.x, 1.21.11, 1.21.8, 1.20.6, and 1.19.4**. It removes two pieces of wasted work that cause Minecraft server lag: unpacking every chest's items from NBT on chunk load, and re-packing them on unload.
 
 > *Keywords: Minecraft, Paper, performance, lag, TPS, chunk loading, container/chest/barrel/shulker box, NBT deserialization, data components, map art, Java agent, ASM, optimization, spark profiler.*
 
-🧠 **Adversarially audited by Claude Fable 5** (49 independent agents, split between finding problems and trying to disprove them — see [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)): 14 findings survived cross-examination, 0 were overturned. Verdict: **bounded memory (no leak), net savings on disk work (no busywork), zero item-loss risk in normal play**. One edge-case bug requiring admin commands to trigger (containers that get cloned/edited via raw NBT commands could end up sharing the same underlying data) was found and fixed.
+🧠 The original single-version 26.2 implementation underwent a 49-agent Claude Fable 5 adversarial audit (see [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md)) and fixed one admin-command-only data-aliasing bug. **That report is historical design evidence and does not cover this multi-version rewrite.** The rewrite is validated by real bytecode tests for four NMS layouts and seven Paper runtime round-trips.
 
 ⚠️ **This is a Java agent, NOT a plugin** — attach it with `-javaagent:`. **Do not drop it in `plugins/`** (it does nothing there).
 
 > 🔒 **Version-sensitive (read first)**
-> This agent weaves bytecode **directly into Paper 26.2 / Java 25** internals (template classfile major 69). It is **version-locked**.
-> - **For Paper 26.2 + Java 25 only.** Do not use it on any other Minecraft or Java version.
-> - Porting requires: ① recompile `template/` against the matching NMS, ② bump ASM to read the target classfile version, ③ re-validate with shadow mode.
-> - On a version mismatch it **throws on boot or on the first container load** (`VerifyError` / `NoSuchMethodError`). This is a deliberate **fail-stop**: it never silently corrupts or loses data, but the node will not start — so test in a staging environment first.
+> This agent weaves bytecode directly into Paper internals. One jar contains four templates compiled against real Paper NMS; it selects one by exact class and method descriptors, not by trusting a version string.
+> - Tested runtime combinations: Paper **26.2 / 26.1.2 / 26.1.1 on Java 25**, **1.21.11 / 1.21.8 / 1.20.6 on Java 21**, and **1.19.4 on Java 17**.
+> - Paper does not publish a standalone `26.1` download; `26.1.x` here means the tested `26.1.1` and `26.1.2` releases.
+> - An unknown NMS layout logs `unsupported NMS layout` and stays entirely vanilla. A leaf with any missing interception point is also left unchanged, preventing a partial rewrite.
 
 ---
 
 ## Quick start
 
-> Requires **Paper 26.2 + Java 25**.
+> Requires one of the tested Paper / Java combinations above.
 
 **1. Drop the jar** somewhere the node can see it (next to your server jar is easiest). **Not** in `plugins/` — it's a Java agent, not a plugin.
 
@@ -112,7 +112,7 @@ Covers `ChestBlockEntity`, `BarrelBlockEntity`, `ShulkerBoxBlockEntity`. The **s
 A plain plugin can't override NMS (Minecraft's internal server code) methods marked `final` (methods a subclass is forbidden to override), so this uses a **Java agent + ASM bytecode injection** (ASM = a library for reading and rewriting compiled Java bytecode at class-load time):
 
 1. `LazyContainerAgentMain` (`premain`, the very first entry point the JVM runs at startup): appends the whole jar to the **bootstrap classloader** (the common ancestor of every classloader in the JVM — this is what lets it get past Paper's isolated classloader for Minecraft's internal classes), then registers the transformer (the class-rewriter from step 2).
-2. `LazyContainerTransformer` (the ASM logic that does the actual rewriting): splices (grafts foreign fields/methods onto an existing class) `LazyContainerTemplate` — logic written in plain Java and compiled against the *real* NMS source, so the Java compiler itself verifies the method signatures are correct, which is much safer than hand-writing raw bytecode — into `BaseContainerBlockEntity` (the common parent class of every container block). It also redirects the load/save `ContainerHelper` calls inside the three leaf classes (the actual concrete subclasses at the bottom of the inheritance chain — chest, barrel, shulker box) to the lazy versions.
+2. `LazyContainerTransformer` (the ASM logic that does the actual rewriting): identifies the value-io, registry-nbt, legacy Mojang, or legacy Spigot API from the base class's real signatures, then splices the matching `LazyContainerTemplate`. Each template is plain Java compiled against real Paper NMS, so `javac` verifies its calls. It also redirects load/save helper calls inside the three leaf classes (chest, barrel, shulker box) to the lazy versions.
 3. `LazyContainerRuntime` (lives on the bootstrap classloader, pure JDK with zero Minecraft dependencies): the shadow-mode toggle + counters.
 4. **Safety rule:** if splicing the base class fails, the leaf classes are left **completely untouched** → falls back to pure vanilla behavior, so it can never produce a "method not found" crash (`NoSuchMethodError`); any exception during the process → the original, unmodified bytecode is returned.
 
@@ -126,7 +126,7 @@ It changes **when** items are decoded, not **what** a container stores. The on-d
 - **Touched containers** → decoded and saved exactly like vanilla.
 - Only the container's `Items` (the item list stored inside it) are affected — never terrain, blocks, entities, lighting, or other block entities (the objects attached to a block that hold its extra data, e.g. a sign's text or a chest's contents).
 
-Validated by: offline JVM bytecode verification (the class-loading check the JVM runs to confirm bytecode is well-formed); real Paper 26.2 end-to-end round-trips (byte-identical, including data components — the format Minecraft has used since 1.20.5 to describe item properties like enchantments, durability, and custom names; 56-container shadow `shadowMismatch=0`); an adversarial review across 8 failure modes (0 data-affecting paths); a second, larger adversarial audit by **Claude Fable 5** (49 agents, run against the current code — same result: 0 item-loss paths, plus one admin-command-only edge case found and fixed). See [`docs/test-reports/26.2.md`](docs/test-reports/26.2.md), [`FINDINGS.md`](FINDINGS.md), [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md), [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md).
+Validated by: real-NMS bytecode tests for all four layouts; two-boot Paper round-trips on 26.2, 26.1.2, 26.1.1, 1.21.11, 1.21.8, 1.20.6, and 1.19.4, including a same-instance reload without `Items` (every run: `stash=5 ensure=2 rawSave=8 eagerLoad=0 shadowMismatch=0`); and the original 26.2 data-component and 56-container shadow tests. The adversarial reports remain useful historical context for the original implementation. See [`docs/test-reports/multi-version.md`](docs/test-reports/multi-version.md), [`docs/test-reports/26.2.md`](docs/test-reports/26.2.md), [`FINDINGS.md`](FINDINGS.md), [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md), and [`FABLE5-AUDIT.md`](FABLE5-AUDIT.md).
 
 ---
 
@@ -152,12 +152,13 @@ Watch **`shadowMismatch=0`**. With `-Dlazycontainer.dump=true`, both kinds dump 
 ## Build
 
 ```bash
-bash build.sh   # needs JDK 25 (see note below); outputs target/LazyContainerAgent.jar
+bash build.sh --prepare  # first build: fetch pinned Paper NMS, test, and package
+bash build.sh            # later builds: reuse nms-lib/
 ```
 
-Needs `nms-lib/` (your Paper server core's NMS — Minecraft's internal server code — compile-time libraries, for `template/` to compile against the real NMS). Not committed to git — place it before building.
+Requires **JDK 21+, Maven, curl, jq, and sha256sum**. `--prepare` uses Paper's official Fill API, verifies SHA-256 checksums, and creates `nms-lib/`. That directory is not committed because it contains large Mojang/Paper artifacts.
 
-Steps: ① `mvn package` (compiles the agent's own classes, bundles + relocates its ASM dependency into the jar, and writes the manifest) → ② `javac` compiles `template/` against the real NMS source — **this step needs JDK 25**, because it has to produce bytecode matching the Paper 26.2 server's Java 25 runtime; the agent's own classes target a more broadly-compatible JDK 21 bytecode level, but the whole build is run under JDK 25 (`build.sh` sets this for you) → ③ `jar uf` injects the compiled template `.class` file into the jar as plain data — at runtime only its raw bytes are ever read, it is never actually loaded as a class.
+Steps: ① compile the bootstrap agent as Java 17 bytecode; ② compile four templates against pinned real NMS as Java 21 / 17 bytecode; ③ run JUnit tests against the actual Paper classes, covering base splicing, all three leaves, and atomic rejection of partial matches; ④ shade ASM and package all four template classes as passive resources in one jar.
 
 ## Deployment
 
@@ -175,9 +176,12 @@ java -Xms8000M -Xmx8000M \
 The boot log should show:
 ```
 [LazyContainer] LazyContainerAgent —— crafted by 廢土貓大 LogoCat · 廢土 · mcfallout.net
-[LazyContainer] spliced 2 fields + 7 methods into BaseContainerBlockEntity
-[LazyContainer] transformed leaf .../ChestBlockEntity
 [LazyContainer] agent installed (transformer registered) [SHADOW mode]
+[LazyContainer] detected Paper ... (layout=...)
+[LazyContainer] spliced ... fields + ... methods into ...
+[LazyContainer] transformed leaf ...Chest... (load=1 save=1 getItems=1 getContents=1 setItems=1)
+[LazyContainer] transformed leaf ...Barrel... (load=1 save=1 getItems=1 getContents=1 setItems=1)
+[LazyContainer] transformed leaf ...ShulkerBox... (load=1 save=1 getItems=1 getContents=1 setItems=1)
 ```
 
 ## Flags
@@ -197,7 +201,7 @@ The boot log should show:
 ## Limitations
 
 - **Benefit depends on containers being untouched.** Churn / idle storage (load → nobody touches → unload) wins big; a busy hopper/comparator sorting hall materializes containers, so the pure savings shrink (the main benefit there becomes "spread the load-time spike out"). The sibling project **ChunkForceManager** complements this from the other end (stop chunks from repeatedly loading/unloading in the first place).
-- **Version-locked** to Paper 26.2 / Java 25 (template classfile major version 69). A mismatch fails loudly (VerifyError/NoSuchMethod), never silently.
+- **Version-sensitive.** Only the listed Paper families and matching NMS layouts are supported. A future Paper build can change internals without changing its public version; confirm the detected layout and all three `transformed leaf` messages in a shadow-mode staging boot.
 - Does **not** save disk I/O or GC — only the pack/unpack CPU.
 
 ---
@@ -208,13 +212,16 @@ The boot log should show:
 src/main/java/io/github/kuohsuanlo/lazycontainer/
   LazyContainerAgentMain.java   premain / bootstrap classloader attachment
   LazyContainerRuntime.java     bootstrap, pure JDK: shadow toggle + counters
+  NmsTarget.java                four NMS layouts, descriptors, and template mapping
   LazyContainerTransformer.java ASM: splices the base class + rewrites the leaves
-template/.../LazyContainerTemplate.java   the lazy logic, compiled against real NMS (the splice source)
+templates/{value-io,registry-nbt,legacy-*}/...   four javac-verified splice sources
+tools/prepare-paper-nms.sh      fetches, verifies, and patches pinned Paper NMS
+tools/runtime-test.sh           real Paper two-boot round-trip test
 tools/scan_containers.py        scans region files for the densest-container chunks (finds the most expensive spots to load)
 build.sh  pom.xml  nms-lib/ (not committed to git)
 FINDINGS.md           facts confirmed by decompilation + design rationale + risk analysis
-ADVERSARIAL-REVIEW.md adversarial review report (8 failure modes, 12 agents)
-FABLE5-AUDIT.md        second-round adversarial audit by Claude Fable 5 (49 agents; answers the memory/duplicate-work/item-loss questions)
+ADVERSARIAL-REVIEW.md historical 26.2 adversarial review (8 failure modes, 12 agents)
+FABLE5-AUDIT.md        historical 26.2 second-round adversarial audit (49 agents)
 TESTING.md            how to test it yourself (automated round-trip / manual play-testing / shadow-validate against a real-world copy)
 ```
 

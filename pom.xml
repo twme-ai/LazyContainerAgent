@@ -6,15 +6,15 @@
 
     <groupId>io.github.kuohsuanlo</groupId>
     <artifactId>LazyContainerAgent</artifactId>
-    <version>26.2-1</version>
+    <version>2.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>LazyContainerAgent</name>
     <description>Lazy container item deserialization / skip-clean-save for plain Paper via a Java agent</description>
 
     <properties>
-        <!-- agent 類別輸出 v21 bytecode(純 JDK + relocated ASM,於 Java 25 server 上跑無虞);
-             template 由 build.sh 另以 JDK 25 對 26.2 mojmap NMS(major69)編譯後注入 -->
-        <maven.compiler.release>21</maven.compiler.release>
+        <!-- The bootstrap agent is Java 17 bytecode. Version-specific templates are compiled
+             separately by build.sh, then copied into this jar as passive class resources. -->
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <asm.version>9.10.1</asm.version>
     </properties>
@@ -44,11 +44,25 @@
             <artifactId>asm-commons</artifactId>
             <version>${asm.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.13.4</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <finalName>LazyContainerAgent</finalName>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
@@ -64,9 +78,15 @@
                             <Implementation-Vendor>廢土貓大 LogoCat (mcfallout.net)</Implementation-Vendor>
                             <Built-By>LogoCat</Built-By>
                             <Author>廢土貓大 LogoCat — mcfallout.net</Author>
+                            <LazyContainer-Supported-Versions>26.2,26.1.x,1.21.11,1.21.8,1.20.6,1.19.4</LazyContainer-Supported-Versions>
                         </manifestEntries>
                     </archive>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.3</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

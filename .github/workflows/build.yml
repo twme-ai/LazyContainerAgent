@@ -1,0 +1,28 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Build all NMS templates and run bytecode tests
+        run: bash build.sh --prepare
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LazyContainerAgent
+          path: target/LazyContainerAgent.jar
+          if-no-files-found: error
